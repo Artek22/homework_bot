@@ -28,7 +28,7 @@ TELEGRAM_TOKEN = os.getenv('BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('T_CHAT_ID')
 
 
-RETRY_TIME = 600
+RETRY_TIME = 5
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
@@ -42,11 +42,10 @@ HOMEWORK_STATUSES = {
 
 def check_tokens():
     """Проверяем доступность переменных окружения."""
-    if all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
-        return True
-    else:
+    if not all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
         logger.critical('Отсутствуют одна или несколько переменных окружения')
         return False
+    return True
 
 
 def send_message(bot, message):
@@ -55,16 +54,7 @@ def send_message(bot, message):
         bot.send_message(TELEGRAM_CHAT_ID, message)
         logger.info('Успешная отправка сообщения в Telegram.')
     except Exception as error:
-        message = f'{error} - сбой при отправке сообщения в Telegram.'
-        send_error(error, message)
-
-
-def send_error(error, message):
-    """Отправка сообщения об ошибке в Telegram."""
-    message_telegram = f'В работе бота произошла ошибка: {error} {message}'
-    logger.error(message_telegram)
-    logger.info('Информация об ошибке отправлена в Telegram.')
-    send_message(bot, message_telegram)
+        logger.error(f'{error} - сбой при отправке сообщения в Telegram.')
 
 
 def get_api_answer(current_timestamp):
@@ -74,24 +64,23 @@ def get_api_answer(current_timestamp):
     response = requests.get(ENDPOINT, headers=HEADERS, params=PAYLOAD)
     if response.status_code != 200:
         raise AssertionError('Недоступность эндпоинта.')
-    response_json = response.json()
-    return response_json
+    try:
+        return response.json()
+    except ValueError:
+        logger.error('Ответ не в формате json')
+        raise ValueError('Ответ не в формате json')
 
 
 def check_response(response_json):
     """Проверка ответа API сервера."""
-    if type(response_json) is not dict:
+    if not isinstance(response_json, dict):
         raise TypeError('Ответ API отличен от словаря')
-    try:
-        homeworks2 = response_json.get('homeworks')
-    except KeyError:
-        logger.error('Ошибка словаря по ключу homeworks')
-        raise KeyError('Ошибка словаря по ключу homeworks')
+    homeworks2 = response_json.get('homeworks')
     try:
         homework = homeworks2[0]
     except IndexError:
-        logger.debug('Список домашних работ пуст')
-        raise IndexError('Список домашних работ пуст')
+        logger.debug('Ответа от ревьюера нет.')
+        homework = {'homework_name': '', 'status': ''}
     return homework
 
 
@@ -106,14 +95,13 @@ def parse_status(homework):
     if homework_status in HOMEWORK_STATUSES:
         verdict = HOMEWORK_STATUSES[homework_status]
         return f'Изменился статус проверки работы "{homework_name}". {verdict}'
-    else:
-        logger.error('Непонятный статус домашней работы.')
 
 
 def main():
     """Основная логика работы бота."""
+    status_telegram = ''
+    bot_error = ''
     current_timestamp = int(time.time())
-    global bot
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     check_tokens()
     while True:
@@ -121,13 +109,20 @@ def main():
             message = get_api_answer(current_timestamp)
             answer = check_response(message)
             status = parse_status(answer)
-            print(status)
             if isinstance(status, str):
-                send_message(bot, status)
+                # Повторяющиеся сообщения о проверке ДЗ не приходят
+                if status_telegram != status:
+                    send_message(bot, status)
+                    status_telegram = status
             current_timestamp = int(time.time())
             time.sleep(RETRY_TIME)
 
-        except Exception:
+        except Exception as error:
+            logger.error(f'Ошибка работы бота - {error}')
+            # Повторяющиеся сообщения об ошибке не приходят
+            if error != bot_error:
+                send_message(bot, error)
+                bot_error = error
             time.sleep(RETRY_TIME)
 
 
